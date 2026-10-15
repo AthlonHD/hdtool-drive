@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自驾可达范围</title>
+<style>
+  :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#2563eb}
+  @media (prefers-color-scheme:dark){:root{--bg:#1c1c1e;--fg:#f2f2f2;--mut:#aaa;--line:#3a3a3c;--acc:#60a5fa}}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  #map{position:absolute;inset:0}
+  #panel{position:absolute;top:12px;left:12px;right:12px;max-width:340px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 2px 12px rgba(0,0,0,.18);z-index:10}
+  #panel h1{font-size:15px;margin:0 0 8px}
+  label{display:block;color:var(--mut);margin-top:8px}
+  input{width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .row button{flex:1;min-width:44px;padding:6px 0;border:1px solid var(--line);border-radius:6px;background:none;color:var(--fg);cursor:pointer}
+  .row button.on,#go{background:var(--acc);border-color:var(--acc);color:#fff}
+  #go{width:100%;margin-top:10px;padding:9px;border-radius:6px;border:0;font:inherit;cursor:pointer}
+  #go:disabled{opacity:.6}
+  #msg{margin-top:8px;color:var(--mut);font-size:12px;min-height:1.5em}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:baseline}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>自驾可达范围</h1>
+  <label>起点(搜索地名,或直接点击地图)<input id="q" placeholder="例如:杭州西湖" autocomplete="off"></label>
+  <label>开车时长(分钟)<input id="min" type="number" min="5" max="720" value="120"></label>
+  <div class="row" id="presets"></div>
+  <button id="go" disabled>绘制可达范围</button>
+  <div id="msg">加载地图中…</div>
+</div>
+<script>
+const COLORS = ['#2563eb', '#16a34a', '#f59e0b', '#dc2626', '#9333ea'];
+let map, origin = null, marker, layers = [], run = 0;
+const $ = id => document.getElementById(id), msg = t => $('msg').textContent = t;
+
+[1, 2, 3, 4, 6].forEach(h => {
+  const b = document.createElement('button'); b.textContent = h + 'h';
+  b.onclick = () => { $('min').value = h * 60; };
+  $('presets').appendChild(b);
+});
+
+(async () => {
+  const cfg = await (await fetch('/api/config')).json();
+  if (!cfg.key) return msg('未配置 AMAP_JS_KEY,见 README');
+  window._AMapSecurityConfig = { securityJsCode: cfg.securityJsCode };
+  await new Promise((ok, no) => {
+    const s = document.createElement('script');
+    s.src = `https://webapi.amap.com/maps?v=2.0&key=${cfg.key}&plugin=AMap.AutoComplete,AMap.PlaceSearch`;
+    s.onload = ok; s.onerror = no; document.head.appendChild(s);
+  });
+  map = new AMap.Map('map', { zoom: 7, center: [116.4, 39.9], viewMode: '2D' });
+  const ac = new AMap.AutoComplete({ input: 'q' });
+  const ps = new AMap.PlaceSearch({ pageSize: 1 });
+  ac.on('select', e => { if (e.poi.location) setOrigin([e.poi.location.lng, e.poi.location.lat], true); else ps.search(e.poi.name, (s, r) => { const p = r?.poiList?.pois?.[0]; if (p) setOrigin([p.location.lng, p.location.lat], true); }); });
+  map.on('click', e => setOrigin([e.lnglat.lng, e.lnglat.lat], false));
+  msg('请选择起点');
+})().catch(e => msg('地图加载失败:' + e));
+
+function setOrigin(ll, pan) {
+  origin = ll;
+  if (marker) marker.setPosition(ll); else { marker = new AMap.Marker({ position: ll }); map.add(marker); }
+  if (pan) map.setCenter(ll);
+  $('go').disabled = false; msg(`起点 ${ll[0].toFixed(4)}, ${ll[1].toFixed(4)}`);
+}
+
+$('go').onclick = async () => {
+  const minutes = Number($('min').value), my = ++run;
+  $('go').disabled = true; msg('计算中…(约几秒)');
+  try {
+    const r = await fetch(`/api/isochrone?lng=${origin[0]}&lat=${origin[1]}&minutes=${minutes}`);
+    const d = await r.json(); if (!r.ok) throw new Error(d.error);
+    if (my !== run) return;
+    const c = COLORS[layers.length % COLORS.length];
+    const poly = new AMap.Polygon({ path: d.polygon, strokeColor: c, strokeWeight: 2, fillColor: c, fillOpacity: .15 });
+    const label = new AMap.Text({ text: `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)}h`, position: d.polygon[Math.floor(d.polygon.length / 4)], style: { 'background': c, color: '#fff', border: 0, padding: '1px 6px', 'font-size': '12px' } });
+    map.add([poly, label]); layers.push(poly, label);
+    map.setFitView([poly, marker], false, [60, 60, 60, 60]);
+    msg(`${minutes} 分钟可达,最远约 ${Math.max(...d.reachKm)} km。可换时长叠加多圈。`);
+  } catch (e) { msg('失败:' + e.message); }
+  $('go').disabled = false;
+};
+</script>
+</body>
+</html>
